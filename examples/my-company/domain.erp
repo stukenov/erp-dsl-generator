@@ -1,0 +1,38 @@
+erp MyCompany 1.0.0
+
+use pack Base.v1
+
+module Core {
+  doc = "Основные сущности системы"
+
+  entity User {
+    doc = "Пользователь системы"
+    pk = id
+    username: Text(required, unique, max=50)
+    email: Email(required, unique)
+    first_name: Text(required, max=100)
+    last_name: Text(required, max=100)
+    is_active: Bool=true
+    
+    created_at: DateTime(auto_create)
+    updated_at: DateTime(auto_update)
+  }
+
+  entity Company {
+    doc = "Компания"
+    pk = id
+    name: Text(required, max=200)
+    tax_id: Text(unique, max=50)
+    email: Email
+    phone: Phone
+    address: Address
+    is_active: Bool=true
+    
+    created_at: DateTime(auto_create)
+    updated_at: DateTime(auto_update)
+  }
+}
+
+role Admin grants * on *
+role Manager grants crud on Company,User
+role User grants read on Company 

@@ -1,0 +1,51 @@
+{
+  "name": "@erp-core/generator",
+  "version": "0.1.0",
+  "description": "ERP Core DSL-based Code Generator",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "demo:lexer": "tsx src/simple-demo.ts",
+    "demo:parser": "tsx src/parser-demo.ts",
+    "demo:full": "tsx src/full-demo.ts",
+    "demo:backend": "tsx src/backend-demo.ts",
+    "demo:fullstack": "tsx src/fullstack-demo.ts",
+    "demo:dev": "tsx src/dev-demo.ts",
+    "demo:enhanced": "tsx src/enhanced-demo.ts",
+    "demo:folder": "tsx src/folder-demo.ts",
+    "cli:enhanced": "tsx src/enhanced-cli.ts"
+  },
+  "bin": {
+    "erp": "./dist/cli.js"
+  },
+  "dependencies": {
+    "commander": "^11.1.0",
+    "chevrotain": "^11.0.3",
+    "yaml": "^2.3.4",
+    "fs-extra": "^11.2.0",
+    "handlebars": "^4.7.8",
+    "chalk": "^5.3.0",
+    "inquirer": "^9.2.12"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/fs-extra": "^11.0.4",
+    "@types/inquirer": "^9.0.7",
+    "typescript": "^5.3.0",
+    "tsx": "^4.6.0",
+    "vitest": "^1.0.0"
+  },
+  "keywords": [
+    "erp",
+    "dsl",
+    "code-generator",
+    "business-automation"
+  ],
+  "author": "ERP Core Team",
+  "license": "MIT"
+} 

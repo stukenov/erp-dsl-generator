@@ -1,0 +1,10 @@
+name: SimpleCompany
+version: 1.0.0
+description: "Простая ERP система для демонстрации"
+
+database:
+  type: sqlite
+  file: database.sqlite
+
+conventions:
+  - Base.v1 

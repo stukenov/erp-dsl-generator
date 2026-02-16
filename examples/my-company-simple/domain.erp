@@ -1,0 +1,26 @@
+erp MyCompanySimple 1.0
+
+use pack Base.v1
+
+entity User {
+  doc = "Пользователь системы"
+  pk = id
+  username: Text
+  email: Email
+  first_name: Text
+  last_name: Text
+  is_active: Bool
+}
+
+entity Company {
+  doc = "Компания"
+  pk = id
+  name: Text
+  email: Email
+  phone: Phone
+  is_active: Bool
+}
+
+role Admin grants all on *
+role Manager grants crud on Company,User
+role User grants read on Company 

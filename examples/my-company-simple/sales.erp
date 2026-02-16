@@ -1,0 +1,33 @@
+module Sales {
+  doc = "Модуль управления продажами"
+
+  entity Customer {
+    doc = "Клиент компании"
+    pk = id
+    name: Text
+    email: Email
+    phone: Phone
+    is_active: Bool
+  }
+
+  entity Product {
+    doc = "Товар или услуга"
+    pk = id
+    name: Text
+    price: Money
+    is_active: Bool
+  }
+
+  entity Order {
+    doc = "Заказ клиента"
+    pk = id
+    customer: Customer
+    product: Product
+    quantity: Int
+    total: Money
+    status: Text
+  }
+}
+
+role SalesManager grants crud on Customer,Product,Order
+role SalesAgent grants read on Customer,Product,Order 

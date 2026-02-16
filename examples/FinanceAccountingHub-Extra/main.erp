@@ -1,0 +1,2088 @@
+erp FinanceAccountingHub 0.1
+use pack Base.v0, Accounting.v2025, Finance.v2025, Compliance.v2025
+
+module FinanceCore {
+  // ===== БАЗОВАЯ ПЛАТФОРМА УЧЁТА =====
+  
+  // Движок двойной записи - ACID-ledger с versioning
+  entity LedgerEntry {
+    doc = "Запись в главной книге - атомарный JSON-журнал с версионированием"
+    pk = id
+    
+    transaction_id : Text(36, required, unique)  // UUID транзакции
+    version : Int(default=1, required)
+    entry_number : Code(auto_seq="LE-{YYYY}-{########}")
+    
+    // Мета-информация
+    posting_date : Date(required)
+    value_date : Date(required) 
+    period : AccountingPeriod(1, required)
+    entity : LegalEntity(1, required)
+    
+    // Документ-источник
+    source_document_type : Enum[Manual,Invoice,Payment,JournalEntry,Accrual,Revaluation,Consolidation]
+    source_document_id : Text?
+    reference : Text(max=200)
+    description : Text(max=500, required, i18n)
+    
+    // Валюта и суммы
+    currency : Currency(1, required)
+    functional_currency : Currency(1, required) // валюта отчётности
+    exchange_rate : Decimal(18,6, default=1.0)
+    
+    // Статус и контроль
+    status : Enum[Draft,Posted,Reversed,Adjusted] = Draft
+    posted_by : User(1)
+    posted_at : DateTime(auto_create)
+    reversed_by : User?
+    reversed_at : DateTime?
+    reversal_reason : Text?
+    
+    // Аудит
+    created_by : User(1, required)
+    created_at : DateTime(auto_create)
+    updated_by : User?
+    updated_at : DateTime(auto_update)
+    
+    // Связи
+    lines : LedgerLine*
+    attachments : Document*
+    
+    // Контрольные суммы
+    total_debit : Money(calc=sum(lines[type=Debit].amount))
+    total_credit : Money(calc=sum(lines[type=Credit].amount))
+    is_balanced : Bool(calc=total_debit==total_credit)
+  }
+  
+  entity LedgerLine {
+    doc = "Строка проводки - дебет или кредит"
+    pk = id
+    
+    entry : LedgerEntry(1, required, backref=lines, cascade)
+    line_number : Int(required)
+    
+    // Счёт и аналитика
+    account : ChartOfAccount(1, required)
+    cost_center : CostCenter?
+    project : Project?
+    department : Department?
+    
+    // Тип и сумма
+    type : Enum[Debit,Credit] = Debit
+    amount : Money(required, min=0.01)
+    functional_amount : Money(calc=amount*entry.exchange_rate)
+    
+    // Дополнительная аналитика
+    partner : BusinessPartner?
+    tax_code : TaxCode?
+    
+    description : Text(max=200, i18n)
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== МУЛЬТИВАЛЮТНОСТЬ =====
+  
+  entity Currency {
+    doc = "Справочник валют"
+    pk = code
+    
+    code : Code(3, required, unique) // ISO 4217
+    name : Text(100, required, i18n)
+    symbol : Text(5)
+    decimal_places : Int(default=2, min=0, max=6)
+    
+    is_functional : Bool(default=false) // валюта отчётности
+    is_active : Bool(default=true)
+    
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  entity ExchangeRate {
+    doc = "Курсы валют"
+    pk = id
+    
+    from_currency : Currency(1, required)
+    to_currency : Currency(1, required)
+    rate_date : Date(required)
+    rate_type : Enum[Official,Commercial,Manual] = Official
+    
+    rate : Decimal(18,6, required, min=0.000001)
+    inverse_rate : Decimal(18,6, calc=1/rate)
+    
+    source : Enum[CentralBank,ECB,Manual,API] = CentralBank
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== МУЛЬТИ-ENTITY & CONSOLIDATION =====
+  
+  entity LegalEntity {
+    doc = "Юридическое лицо / компания группы"
+    pk = id
+    
+    code : Code(max=16, unique, required)
+    name : Text(200, required, i18n)
+    legal_name : Text(250, required)
+    
+    // Регистрационные данные
+    registration_number : Text(50)
+    tax_number : Text(50)
+    vat_number : Text(50)
+    
+    // Адрес
+    country : Country(1, required)
+    address : Address(required)
+    
+    // Настройки учёта
+    functional_currency : Currency(1, required)
+    fiscal_year_end : Date(required) // конец фин.года
+    chart_of_accounts : ChartOfAccountsTemplate(1)
+    
+    // Консолидация
+    parent_entity : LegalEntity?
+    consolidation_method : Enum[FullConsolidation,ProportionalConsolidation,EquityMethod,None] = None
+    ownership_percentage : Decimal(5,2, min=0, max=100)
+    
+    is_active : Bool(default=true)
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  entity IntercompanyTransaction {
+    doc = "Межфирменные операции"
+    pk = id
+    
+    transaction_number : Code(auto_seq="IC-{YYYY}-{######}")
+    
+    from_entity : LegalEntity(1, required)
+    to_entity : LegalEntity(1, required)
+    
+    transaction_date : Date(required)
+    amount : Money(required)
+    currency : Currency(1, required)
+    
+    description : Text(500, required)
+    elimination_status : Enum[Pending,Eliminated,Exception] = Pending
+    
+    // Связанные проводки
+    from_ledger_entry : LedgerEntry?
+    to_ledger_entry : LedgerEntry?
+    elimination_entry : LedgerEntry?
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== ПЕРИОД-МЕНЕДЖЕР =====
+  
+  entity AccountingPeriod {
+    doc = "Учётный период"
+    pk = id
+    
+    entity : LegalEntity(1, required)
+    period_code : Code(7, required) // YYYY-MM
+    
+    start_date : Date(required)
+    end_date : Date(required)
+    
+    status : Enum[Open,SoftClose,HardClose] = Open
+    
+    // Контроль закрытия
+    closed_by : User?
+    closed_at : DateTime?
+    close_checklist : PeriodCloseTask*
+    
+    // Ограничения
+    allow_manual_entries : Bool(default=true)
+    allow_adjustments : Bool(default=true)
+    
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  entity PeriodCloseTask {
+    doc = "Задача закрытия периода"
+    pk = id
+    
+    period : AccountingPeriod(1, required, backref=close_checklist)
+    task_code : Code(20, required)
+    task_name : Text(200, required, i18n)
+    
+    owner : User(1, required)
+    due_date : Date(required)
+    
+    status : Enum[NotStarted,InProgress,Completed,Blocked] = NotStarted
+    priority : Enum[Low,Medium,High,Critical] = Medium
+    
+    dependencies : PeriodCloseTask*
+    
+    completed_by : User?
+    completed_at : DateTime?
+    notes : Text?
+    
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+}
+
+module GeneralLedger {
+  // ===== CHART OF ACCOUNTS DESIGNER =====
+  
+  entity ChartOfAccountsTemplate {
+    doc = "Шаблон плана счетов"
+    pk = id
+    
+    code : Code(20, unique, required)
+    name : Text(200, required, i18n)
+    standard : Enum[IFRS,USGAAP,KZNFRK,Custom] = IFRS
+    version : Text(10, required)
+    
+    description : Text(1000, i18n)
+    is_active : Bool(default=true)
+    
+    accounts : ChartOfAccount*
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  entity ChartOfAccount {
+    doc = "Счёт плана счетов"
+    pk = id
+    
+    template : ChartOfAccountsTemplate(1, backref=accounts)
+    entity : LegalEntity(1, required)
+    
+    account_code : Code(20, required)
+    account_name : Text(200, required, i18n)
+    
+    // Иерархия
+    parent_account : ChartOfAccount?
+    account_level : Int(required, min=1, max=10)
+    full_code : Text(100, calc=parent_account.full_code + "." + account_code)
+    
+    // Классификация
+    account_type : Enum[Asset,Liability,Equity,Revenue,Expense,Gain,Loss]
+    account_subtype : Text(50)
+    normal_balance : Enum[Debit,Credit]
+    
+    // Настройки
+    is_active : Bool(default=true)
+    is_summary : Bool(default=false) // итоговый счёт
+    allow_posting : Bool(default=true) // разрешить проводки
+    
+    // Сегменты аналитики
+    requires_cost_center : Bool(default=false)
+    requires_project : Bool(default=false)
+    requires_partner : Bool(default=false)
+    
+    // Валютные настройки
+    currency_control : Enum[None,Single,Multi] = None
+    default_currency : Currency?
+    
+    // Контроль остатков
+    allow_negative_balance : Bool(default=true)
+    
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  // ===== JOURNAL ENTRY ENGINE =====
+  
+  entity JournalEntryTemplate {
+    doc = "Шаблон типовой проводки"
+    pk = id
+    
+    code : Code(20, unique, required)
+    name : Text(200, required, i18n)
+    description : Text(1000, i18n)
+    
+    entity : LegalEntity(1, required)
+    category : Enum[Manual,Accrual,Recurring,Closing,Opening,Adjustment]
+    
+    // Шаблон строк
+    template_lines : JournalTemplateLineitem*
+    
+    // Настройки повторения
+    is_recurring : Bool(default=false)
+    recurrence_pattern : Enum[Monthly,Quarterly,Yearly]?
+    next_posting_date : Date?
+    
+    is_active : Bool(default=true)
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  entity JournalTemplateLineitem {
+    doc = "Строка шаблона проводки"
+    pk = id
+    
+    template : JournalEntryTemplate(1, backref=template_lines)
+    line_number : Int(required)
+    
+    account : ChartOfAccount(1, required)
+    type : Enum[Debit,Credit]
+    
+    // Формула суммы или фиксированная сумма
+    amount_formula : Text? // например: "invoice.total * 0.12"
+    fixed_amount : Money?
+    
+    description_template : Text(200, i18n)
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== ACCRUALS & SCHEDULES =====
+  
+  entity AccrualSchedule {
+    doc = "График начислений/отложенных доходов-расходов"
+    pk = id
+    
+    schedule_number : Code(auto_seq="AS-{YYYY}-{######}")
+    entity : LegalEntity(1, required)
+    
+    schedule_type : Enum[DeferredRevenue,DeferredExpense,AccruedRevenue,AccruedExpense]
+    
+    // Основные параметры
+    total_amount : Money(required)
+    currency : Currency(1, required)
+    start_date : Date(required)
+    end_date : Date(required)
+    
+    // Метод распределения
+    allocation_method : Enum[StraightLine,Accelerated,Manual] = StraightLine
+    posting_frequency : Enum[Monthly,Quarterly,Yearly] = Monthly
+    
+    // Счета
+    balance_sheet_account : ChartOfAccount(1, required)
+    pnl_account : ChartOfAccount(1, required)
+    
+    // Статус
+    status : Enum[Draft,Active,Completed,Cancelled] = Draft
+    
+    // Строки графика
+    schedule_lines : AccrualScheduleLine*
+    
+    description : Text(500)
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  entity AccrualScheduleLine {
+    doc = "Строка графика начислений"
+    pk = id
+    
+    schedule : AccrualSchedule(1, backref=schedule_lines)
+    line_number : Int(required)
+    
+    posting_date : Date(required)
+    amount : Money(required)
+    
+    status : Enum[Planned,Posted,Skipped] = Planned
+    ledger_entry : LedgerEntry?
+    
+    created_at : DateTime(auto_create)
+    posted_at : DateTime?
+  }
+}
+
+module AccountsPayable {
+  // ===== VENDOR MASTER =====
+  
+  entity Vendor {
+    doc = "Поставщик"
+    pk = id
+    
+    vendor_code : Code(20, unique, required)
+    vendor_name : Text(200, required, i18n)
+    legal_name : Text(250)
+    
+    // Классификация
+    vendor_type : Enum[Individual,Company,Government] = Company
+    vendor_category : Text(50)
+    industry : Text(100)
+    
+    // Контактная информация
+    primary_contact : Contact(1)
+    billing_address : Address(required)
+    shipping_address : Address?
+    
+    // Реквизиты
+    tax_number : Text(50)
+    vat_number : Text(50)
+    registration_number : Text(50)
+    
+    // Банковские реквизиты
+    bank_accounts : VendorBankAccount*
+    
+    // Настройки платежей
+    payment_terms : PaymentTerm(1)
+    default_currency : Currency(1)
+    
+    // Кредитный контроль
+    credit_limit : Money?
+    credit_rating : Enum[AAA,AA,A,BBB,BB,B,CCC,CC,C,D]?
+    
+    // KYC документы
+    kyc_status : Enum[NotStarted,InProgress,Approved,Rejected,Expired] = NotStarted
+    kyc_documents : Document*
+    
+    // Контракты и SLA
+    contracts : VendorContract*
+    
+    // Статус
+    status : Enum[Active,Inactive,Blocked,OnHold] = Active
+    block_reason : Text?
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  entity VendorBankAccount {
+    doc = "Банковский счёт поставщика"
+    pk = id
+    
+    vendor : Vendor(1, backref=bank_accounts)
+    
+    bank_name : Text(200, required)
+    bank_code : Text(20) // SWIFT/BIC
+    account_number : Text(50, required)
+    iban : Text(34)?
+    
+    currency : Currency(1, required)
+    is_primary : Bool(default=false)
+    is_active : Bool(default=true)
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  entity VendorContract {
+    doc = "Договор с поставщиком"
+    pk = id
+    
+    vendor : Vendor(1, backref=contracts)
+    
+    contract_number : Code(50, unique, required)
+    contract_name : Text(200, required)
+    
+    start_date : Date(required)
+    end_date : Date?
+    
+    contract_value : Money?
+    currency : Currency(1)
+    
+    payment_terms : PaymentTerm(1)
+    
+    // SLA параметры
+    delivery_days : Int?
+    quality_requirements : Text?
+    
+    status : Enum[Draft,Active,Expired,Terminated] = Draft
+    
+    document : Document?
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== INVOICE CAPTURE =====
+  
+  entity VendorInvoice {
+    doc = "Счёт поставщика"
+    pk = id
+    
+    invoice_number : Code(50, required)
+    vendor_invoice_number : Text(50, required) // номер у поставщика
+    
+    vendor : Vendor(1, required)
+    entity : LegalEntity(1, required)
+    
+    // Даты
+    invoice_date : Date(required)
+    due_date : Date(required)
+    received_date : Date(auto_create)
+    
+    // Суммы
+    currency : Currency(1, required)
+    subtotal : Money(required)
+    tax_amount : Money(default=0)
+    total_amount : Money(calc=subtotal + tax_amount)
+    
+    // Источник поступления
+    capture_method : Enum[Manual,Email,EDI,OCR,API] = Manual
+    original_document : Document?
+    
+    // Привязка к заказу
+    purchase_order : PurchaseOrder?
+    
+    // Кодировка расходов
+    invoice_lines : VendorInvoiceLine*
+    
+    // Workflow
+    status : Enum[Draft,PendingApproval,Approved,Rejected,Paid,Cancelled] = Draft
+    approval_workflow : ApprovalWorkflow?
+    
+    // Сопоставление (3-way match)
+    match_status : Enum[NotMatched,PartialMatch,FullMatch,Exception] = NotMatched
+    match_tolerance_exceeded : Bool(default=false)
+    
+    // Платёж
+    payment_status : Enum[Unpaid,PartiallyPaid,Paid,Overpaid] = Unpaid
+    payment_run : PaymentRun?
+    
+    // Аудит
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  entity VendorInvoiceLine {
+    doc = "Строка счёта поставщика"
+    pk = id
+    
+    invoice : VendorInvoice(1, backref=invoice_lines)
+    line_number : Int(required)
+    
+    description : Text(500, required)
+    quantity : Decimal(12,3, default=1)
+    unit_price : Money(required)
+    line_total : Money(calc=quantity * unit_price)
+    
+    // Кодировка
+    account : ChartOfAccount(1, required)
+    cost_center : CostCenter?
+    project : Project?
+    
+    // Налоги
+    tax_code : TaxCode?
+    tax_amount : Money(default=0)
+    
+    // Привязка к товару/услуге
+    product : Product?
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== APPROVAL WORKFLOW =====
+  
+  entity ApprovalWorkflow {
+    doc = "Маршрут согласования"
+    pk = id
+    
+    workflow_name : Text(100, required)
+    entity : LegalEntity(1, required)
+    
+    // Условия запуска
+    document_type : Enum[VendorInvoice,PaymentRequest,JournalEntry]
+    amount_threshold : Money?
+    department : Department?
+    
+    // Шаги согласования
+    approval_steps : ApprovalStep*
+    
+    is_active : Bool(default=true)
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  entity ApprovalStep {
+    doc = "Шаг согласования"
+    pk = id
+    
+    workflow : ApprovalWorkflow(1, backref=approval_steps)
+    step_number : Int(required)
+    
+    step_name : Text(100, required)
+    approver_role : Role(1)
+    
+    is_required : Bool(default=true)
+    timeout_hours : Int(default=48)
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  entity ApprovalInstance {
+    doc = "Экземпляр согласования документа"
+    pk = id
+    
+    workflow : ApprovalWorkflow(1, required)
+    document_id : Text(36, required) // UUID документа
+    document_type : Enum[VendorInvoice,PaymentRequest,JournalEntry]
+    
+    current_step : Int(default=1)
+    status : Enum[Pending,Approved,Rejected,Cancelled] = Pending
+    
+    // История шагов
+    approval_history : ApprovalHistory*
+    
+    started_by : User(1)
+    started_at : DateTime(auto_create)
+    completed_at : DateTime?
+  }
+  
+  entity ApprovalHistory {
+    doc = "История согласования"
+    pk = id
+    
+    approval : ApprovalInstance(1, backref=approval_history)
+    step_number : Int(required)
+    
+    approver : User(1, required)
+    action : Enum[Approved,Rejected,Delegated] = Approved
+    comments : Text?
+    
+    action_date : DateTime(auto_create)
+  }
+  
+  // ===== PAYMENT RUN FACTORY =====
+  
+  entity PaymentRun {
+    doc = "Пакет платежей"
+    pk = id
+    
+    run_number : Code(auto_seq="PR-{YYYY}-{######}")
+    entity : LegalEntity(1, required)
+    
+    run_date : Date(required)
+    value_date : Date(required)
+    
+    // Банковский счёт списания
+    bank_account : BankAccount(1, required)
+    
+    // Фильтры отбора
+    vendor_filter : Vendor*
+    due_date_from : Date?
+    due_date_to : Date?
+    
+    // Статистика
+    total_invoices : Int(calc=count(payment_items))
+    total_amount : Money(calc=sum(payment_items.amount))
+    
+    // Статус
+    status : Enum[Draft,Approved,Transmitted,Completed,Failed] = Draft
+    
+    // Элементы платежа
+    payment_items : PaymentItem*
+    
+    // Файл для банка
+    payment_file : Document?
+    bank_response : Text?
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+    transmitted_at : DateTime?
+  }
+  
+  entity PaymentItem {
+    doc = "Элемент платежа в пакете"
+    pk = id
+    
+    payment_run : PaymentRun(1, backref=payment_items)
+    
+    vendor_invoice : VendorInvoice(1, required)
+    amount : Money(required)
+    
+    // Реквизиты получателя
+    beneficiary_name : Text(200, required)
+    beneficiary_account : Text(50, required)
+    beneficiary_bank : Text(200)
+    
+    // Назначение платежа
+    payment_purpose : Text(500, required)
+    
+    // Статус
+    status : Enum[Pending,Sent,Confirmed,Failed] = Pending
+    bank_reference : Text?
+    error_message : Text?
+    
+    created_at : DateTime(auto_create)
+    processed_at : DateTime?
+  }
+}
+
+module AccountsReceivable {
+  // ===== CUSTOMER MASTER =====
+  
+  entity Customer {
+    doc = "Клиент"
+    pk = id
+    
+    customer_code : Code(20, unique, required)
+    customer_name : Text(200, required, i18n)
+    legal_name : Text(250)
+    
+    // Классификация
+    customer_type : Enum[Individual,SME,Enterprise,Government] = Individual
+    industry : Text(100)
+    segment : Enum[Retail,Wholesale,VIP,Strategic] = Retail
+    
+    // Контактная информация
+    primary_contact : Contact(1)
+    billing_address : Address(required)
+    shipping_address : Address?
+    
+    // Реквизиты
+    tax_number : Text(50)
+    vat_number : Text(50)
+    registration_number : Text(50)
+    
+    // Настройки продаж
+    payment_terms : PaymentTerm(1)
+    price_list : PriceList?
+    default_currency : Currency(1)
+    
+    // Кредитный контроль
+    credit_limit : Money(required, default=0)
+    credit_rating : Enum[AAA,AA,A,BBB,BB,B,CCC,CC,C,D]?
+    credit_hold : Bool(default=false)
+    
+    // KYC и UBO
+    kyc_status : Enum[NotStarted,InProgress,Approved,Rejected,Expired] = NotStarted
+    ubo_documents : Document*
+    
+    // Статус
+    status : Enum[Active,Inactive,Blocked,OnHold] = Active
+    block_reason : Text?
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  // ===== INVOICE GENERATION =====
+  
+  entity CustomerInvoice {
+    doc = "Счёт клиенту"
+    pk = id
+    
+    invoice_number : Code(auto_seq="INV-{YYYY}-{######}")
+    entity : LegalEntity(1, required)
+    customer : Customer(1, required)
+    
+    // Даты
+    invoice_date : Date(required)
+    due_date : Date(required)
+    
+    // Суммы
+    currency : Currency(1, required)
+    subtotal : Money(calc=sum(invoice_lines.line_total))
+    tax_amount : Money(calc=sum(invoice_lines.tax_amount))
+    total_amount : Money(calc=subtotal + tax_amount)
+    
+    // Тип счёта
+    invoice_type : Enum[Standard,Recurring,UsageBased,Prepayment,CreditNote] = Standard
+    
+    // Привязка к заказу/контракту
+    sales_order : SalesOrder?
+    subscription : Subscription?
+    
+    // Строки счёта
+    invoice_lines : CustomerInvoiceLine*
+    
+    // Статус
+    status : Enum[Draft,Sent,PartiallyPaid,Paid,Overdue,Written-off,Cancelled] = Draft
+    
+    // e-Invoice
+    einvoice_status : Enum[NotSent,Sent,Accepted,Rejected] = NotSent
+    einvoice_reference : Text?
+    
+    // Платежи
+    payment_status : Enum[Unpaid,PartiallyPaid,Paid,Overpaid] = Unpaid
+    paid_amount : Money(default=0)
+    outstanding_amount : Money(calc=total_amount - paid_amount)
+    
+    // Коллекции
+    dunning_level : Int(default=0)
+    last_dunning_date : Date?
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  entity CustomerInvoiceLine {
+    doc = "Строка счёта клиенту"
+    pk = id
+    
+    invoice : CustomerInvoice(1, backref=invoice_lines)
+    line_number : Int(required)
+    
+    description : Text(500, required)
+    quantity : Decimal(12,3, required)
+    unit_price : Money(required)
+    line_total : Money(calc=quantity * unit_price)
+    
+    // Продукт/услуга
+    product : Product?
+    
+    // Доходный счёт
+    revenue_account : ChartOfAccount(1, required)
+    
+    // Налоги
+    tax_code : TaxCode?
+    tax_amount : Money(default=0)
+    
+    // Аналитика
+    cost_center : CostCenter?
+    project : Project?
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== SUBSCRIPTION BILLING =====
+  
+  entity Subscription {
+    doc = "Подписка клиента"
+    pk = id
+    
+    subscription_number : Code(auto_seq="SUB-{YYYY}-{######}")
+    customer : Customer(1, required)
+    
+    // Параметры подписки
+    start_date : Date(required)
+    end_date : Date?
+    billing_frequency : Enum[Monthly,Quarterly,Yearly] = Monthly
+    next_billing_date : Date(required)
+    
+    // Продукт/план
+    subscription_plan : SubscriptionPlan(1, required)
+    
+    // Цена
+    base_amount : Money(required)
+    currency : Currency(1, required)
+    
+    // Статус
+    status : Enum[Active,Paused,Cancelled,Expired] = Active
+    
+    // История выставления счетов
+    invoices : CustomerInvoice*
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  entity SubscriptionPlan {
+    doc = "План подписки"
+    pk = id
+    
+    plan_code : Code(20, unique, required)
+    plan_name : Text(200, required, i18n)
+    description : Text(1000, i18n)
+    
+    // Цена
+    base_price : Money(required)
+    currency : Currency(1, required)
+    billing_frequency : Enum[Monthly,Quarterly,Yearly] = Monthly
+    
+    // Настройки
+    trial_days : Int(default=0)
+    setup_fee : Money(default=0)
+    
+    is_active : Bool(default=true)
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== DUNNING & COLLECTIONS =====
+  
+  entity DunningRule {
+    doc = "Правило напоминаний о просроченной задолженности"
+    pk = id
+    
+    rule_name : Text(100, required)
+    entity : LegalEntity(1, required)
+    
+    // Условия срабатывания
+    days_overdue : Int(required, min=1)
+    customer_segment : Enum[All,Retail,Wholesale,VIP,Strategic] = All
+    
+    // Действия
+    send_email : Bool(default=true)
+    send_sms : Bool(default=false)
+    apply_interest : Bool(default=false)
+    interest_rate : Decimal(5,2, default=0)
+    
+    // Шаблоны сообщений
+    email_template : Text(2000)
+    sms_template : Text(500)
+    
+    // Эскалация
+    escalate_to_legal : Bool(default=false)
+    escalation_days : Int?
+    
+    is_active : Bool(default=true)
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  entity DunningHistory {
+    doc = "История напоминаний"
+    pk = id
+    
+    customer_invoice : CustomerInvoice(1, required)
+    dunning_rule : DunningRule(1, required)
+    
+    dunning_date : Date(required)
+    dunning_level : Int(required)
+    
+    email_sent : Bool(default=false)
+    sms_sent : Bool(default=false)
+    
+    interest_amount : Money(default=0)
+    
+    response_received : Bool(default=false)
+    response_date : Date?
+    response_notes : Text?
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== CASH APPLICATION =====
+  
+  entity CustomerPayment {
+    doc = "Платёж от клиента"
+    pk = id
+    
+    payment_number : Code(auto_seq="PAY-{YYYY}-{######}")
+    entity : LegalEntity(1, required)
+    
+    // Основные данные
+    payment_date : Date(required)
+    amount : Money(required)
+    currency : Currency(1, required)
+    
+    // Источник платежа
+    bank_account : BankAccount(1, required)
+    bank_reference : Text(100)
+    
+    // Плательщик
+    customer : Customer?
+    payer_name : Text(200) // если не удалось определить клиента
+    payer_account : Text(50)
+    
+    // Применение платежа
+    application_method : Enum[Automatic,Manual,Partial] = Automatic
+    application_status : Enum[Unapplied,PartiallyApplied,FullyApplied] = Unapplied
+    
+    // Строки применения
+    payment_applications : PaymentApplication*
+    
+    // Остаток
+    unapplied_amount : Money(calc=amount - sum(payment_applications.applied_amount))
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  entity PaymentApplication {
+    doc = "Применение платежа к счёту"
+    pk = id
+    
+    payment : CustomerPayment(1, backref=payment_applications)
+    invoice : CustomerInvoice(1, required)
+    
+    applied_amount : Money(required, min=0.01)
+    discount_amount : Money(default=0)
+    
+    application_date : Date(auto_create)
+    applied_by : User(1)
+    
+    created_at : DateTime(auto_create)
+  }
+}
+
+module Treasury {
+  // ===== BANK ACCOUNT REGISTRY =====
+  
+  entity BankAccount {
+    doc = "Банковский счёт компании"
+    pk = id
+    
+    account_number : Text(50, unique, required)
+    account_name : Text(200, required)
+    
+    entity : LegalEntity(1, required)
+    bank : Bank(1, required)
+    
+    // Валюта и тип
+    currency : Currency(1, required)
+    account_type : Enum[Current,Savings,Deposit,Loan,CreditLine] = Current
+    
+    // Лимиты и подписи
+    overdraft_limit : Money(default=0)
+    daily_limit : Money?
+    signatories : User*
+    
+    // Статус
+    is_active : Bool(default=true)
+    opening_date : Date(required)
+    closing_date : Date?
+    
+    // Баланс (кэшированный)
+    current_balance : Money(default=0)
+    available_balance : Money(default=0)
+    last_statement_date : Date?
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  entity Bank {
+    doc = "Справочник банков"
+    pk = id
+    
+    bank_code : Code(20, unique, required)
+    bank_name : Text(200, required, i18n)
+    swift_code : Text(11)
+    
+    country : Country(1, required)
+    
+    // Настройки интеграции
+    supports_api : Bool(default=false)
+    api_endpoint : Text?
+    statement_format : Enum[MT940,CAMT053,CSV,API]
+    
+    is_active : Bool(default=true)
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== STATEMENT IMPORT =====
+  
+  entity BankStatement {
+    doc = "Банковская выписка"
+    pk = id
+    
+    bank_account : BankAccount(1, required)
+    
+    statement_number : Text(50, required)
+    statement_date : Date(required)
+    
+    opening_balance : Money(required)
+    closing_balance : Money(required)
+    
+    // Импорт
+    import_method : Enum[Manual,File,API,Email] = Manual
+    original_file : Document?
+    imported_by : User(1)
+    imported_at : DateTime(auto_create)
+    
+    // Операции
+    transactions : BankTransaction*
+    
+    // Сверка
+    reconciliation_status : Enum[NotReconciled,PartiallyReconciled,FullyReconciled] = NotReconciled
+    reconciled_by : User?
+    reconciled_at : DateTime?
+  }
+  
+  entity BankTransaction {
+    doc = "Банковская операция"
+    pk = id
+    
+    statement : BankStatement(1, backref=transactions)
+    
+    transaction_date : Date(required)
+    value_date : Date(required)
+    
+    // Сумма и направление
+    amount : Money(required)
+    transaction_type : Enum[Credit,Debit]
+    
+    // Описание
+    description : Text(500, required)
+    reference : Text(100)
+    
+    // Контрагент
+    counterparty_name : Text(200)
+    counterparty_account : Text(50)
+    counterparty_bank : Text(200)
+    
+    // Сверка
+    reconciliation_status : Enum[Unmatched,Matched,Exception] = Unmatched
+    matched_document_type : Enum[CustomerPayment,VendorPayment,JournalEntry]?
+    matched_document_id : Text?
+    
+    // Автоматическая сверка
+    match_confidence : Decimal(3,2, min=0, max=1) // 0.0 - 1.0
+    match_rules_applied : Text*
+    
+    created_at : DateTime(auto_create)
+    reconciled_at : DateTime?
+  }
+  
+  // ===== AUTO-RECONCILIATION =====
+  
+  entity ReconciliationRule {
+    doc = "Правило автоматической сверки"
+    pk = id
+    
+    rule_name : Text(100, required)
+    entity : LegalEntity(1, required)
+    
+    // Условия срабатывания
+    bank_account : BankAccount?
+    transaction_type : Enum[Credit,Debit,Both] = Both
+    amount_from : Money?
+    amount_to : Money?
+    
+    // Правила сопоставления
+    match_by_amount : Bool(default=true)
+    amount_tolerance_pct : Decimal(5,2, default=0) // процент отклонения
+    
+    match_by_reference : Bool(default=true)
+    reference_pattern : Text? // regex
+    
+    match_by_counterparty : Bool(default=false)
+    counterparty_pattern : Text?
+    
+    // Действие при совпадении
+    auto_match : Bool(default=true)
+    create_journal_entry : Bool(default=false)
+    journal_template : JournalEntryTemplate?
+    
+    priority : Int(default=100)
+    is_active : Bool(default=true)
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== CASH POSITIONING =====
+  
+  entity CashForecast {
+    doc = "Прогноз денежных потоков"
+    pk = id
+    
+    entity : LegalEntity(1, required)
+    forecast_date : Date(required)
+    
+    // Период прогноза
+    forecast_from : Date(required)
+    forecast_to : Date(required)
+    
+    // Строки прогноза
+    forecast_lines : CashForecastLine*
+    
+    // Итоги
+    total_inflow : Money(calc=sum(forecast_lines[flow_type=Inflow].amount))
+    total_outflow : Money(calc=sum(forecast_lines[flow_type=Outflow].amount))
+    net_flow : Money(calc=total_inflow - total_outflow)
+    
+    // Статус
+    status : Enum[Draft,Approved,Actual] = Draft
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  entity CashForecastLine {
+    doc = "Строка прогноза денежных потоков"
+    pk = id
+    
+    forecast : CashForecast(1, backref=forecast_lines)
+    
+    flow_date : Date(required)
+    flow_type : Enum[Inflow,Outflow]
+    category : Enum[Sales,Purchases,Payroll,Tax,Loan,Investment,Other]
+    
+    amount : Money(required)
+    currency : Currency(1, required)
+    
+    description : Text(200)
+    confidence : Enum[High,Medium,Low] = Medium
+    
+    // Источник прогноза
+    source_type : Enum[Invoice,PurchaseOrder,Contract,Manual]
+    source_document_id : Text?
+    
+    created_at : DateTime(auto_create)
+  }
+}
+
+module eInvoicing {
+  // ===== E-INVOICE CONNECTORS =====
+  
+  entity eInvoiceProvider {
+    doc = "Провайдер электронного документооборота"
+    pk = id
+    
+    provider_code : Code(20, unique, required)
+    provider_name : Text(200, required)
+    
+    // Стандарт
+    standard : Enum[PEPPOL,UBL,FACTURX,ISESF,EFAKTURA] = UBL
+    version : Text(10, required)
+    
+    // Настройки подключения
+    endpoint_url : Text(500, required)
+    test_endpoint_url : Text(500)
+    
+    // Аутентификация
+    auth_method : Enum[Certificate,APIKey,OAuth2] = Certificate
+    certificate : Document?
+    api_key : Text?
+    
+    // Поддерживаемые страны
+    supported_countries : Country*
+    
+    is_active : Bool(default=true)
+    created_at : DateTime(auto_create)
+  }
+  
+  entity eInvoiceConfig {
+    doc = "Настройка электронного документооборота для компании"
+    pk = id
+    
+    entity : LegalEntity(1, required)
+    provider : eInvoiceProvider(1, required)
+    
+    // Идентификаторы в системе провайдера
+    participant_id : Text(100, required)
+    scheme_id : Text(50) // GLN, DUNS, etc.
+    
+    // Сертификаты
+    signing_certificate : Document(required)
+    encryption_certificate : Document?
+    
+    // Настройки
+    auto_send_invoices : Bool(default=false)
+    auto_receive_invoices : Bool(default=false)
+    
+    // Маппинг счетов
+    account_mappings : eInvoiceAccountMapping*
+    
+    is_active : Bool(default=true)
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  entity eInvoiceAccountMapping {
+    doc = "Маппинг счетов для e-Invoice"
+    pk = id
+    
+    config : eInvoiceConfig(1, backref=account_mappings)
+    
+    internal_account : ChartOfAccount(1, required)
+    external_code : Text(50, required) // код в стандарте e-Invoice
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== DIGITAL SIGNATURE ENGINE =====
+  
+  entity DigitalSignature {
+    doc = "Цифровая подпись документа"
+    pk = id
+    
+    document_id : Text(36, required) // UUID документа
+    document_type : Enum[CustomerInvoice,VendorInvoice,Contract,Statement]
+    
+    // Параметры подписи
+    signature_standard : Enum[GOST_CMS,ETSI_XAdES,PKCS7] = ETSI_XAdES
+    signature_level : Enum[B,T,LT,LTA] = B
+    
+    // Сертификат
+    certificate : Document(required)
+    certificate_thumbprint : Text(64, required)
+    
+    // Подписант
+    signer : User(1, required)
+    signing_time : DateTime(required)
+    
+    // Подпись
+    signature_value : Text(required) // Base64
+    signature_hash : Text(64, required) // SHA-256
+    
+    // Проверка
+    is_valid : Bool(default=true)
+    validation_time : DateTime?
+    validation_errors : Text?
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== PAYMENTS API =====
+  
+  entity PaymentProvider {
+    doc = "Провайдер платежей"
+    pk = id
+    
+    provider_code : Code(20, unique, required)
+    provider_name : Text(200, required)
+    
+    // Тип провайдера
+    provider_type : Enum[Bank,PSP,Wallet,Crypto] = PSP
+    
+    // Поддерживаемые методы
+    supported_methods : Enum[Card,BankTransfer,Wallet,QR,BNPL]*
+    supported_currencies : Currency*
+    
+    // API настройки
+    api_endpoint : Text(500, required)
+    webhook_endpoint : Text(500)
+    
+    // Аутентификация
+    api_key : Text?
+    secret_key : Text?
+    merchant_id : Text?
+    
+    // Комиссии
+    transaction_fee_pct : Decimal(5,4, default=0)
+    fixed_fee : Money(default=0)
+    
+    is_active : Bool(default=true)
+    created_at : DateTime(auto_create)
+  }
+  
+  entity PaymentRequest {
+    doc = "Запрос на платёж"
+    pk = id
+    
+    request_number : Code(auto_seq="PAYREQ-{YYYY}-{######}")
+    
+    // Связанный документ
+    customer_invoice : CustomerInvoice(1, required)
+    
+    // Параметры платежа
+    amount : Money(required)
+    currency : Currency(1, required)
+    
+    // Провайдер
+    payment_provider : PaymentProvider(1, required)
+    payment_method : Enum[Card,BankTransfer,Wallet,QR,BNPL]
+    
+    // Ссылки
+    payment_url : Text(500)
+    qr_code : Text? // Base64 изображение
+    
+    // Статус
+    status : Enum[Created,Pending,Completed,Failed,Cancelled,Expired] = Created
+    
+    // Внешние идентификаторы
+    external_payment_id : Text(100)
+    
+    // Уведомления
+    success_url : Text(500)
+    failure_url : Text(500)
+    webhook_url : Text(500)
+    
+    // Даты
+    expires_at : DateTime?
+    completed_at : DateTime?
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+    updated_at : DateTime(auto_update)
+  }
+  
+  // ===== REAL-TIME STATUS =====
+  
+  entity WebhookEvent {
+    doc = "Webhook событие"
+    pk = id
+    
+    event_id : Text(36, unique, required)
+    event_type : Enum[payment.completed,payment.failed,invoice.received,invoice.accepted]
+    
+    // Источник
+    provider : Text(100, required)
+    external_id : Text(100)
+    
+    // Полезная нагрузка
+    payload : Json(required)
+    headers : Json
+    
+    // Обработка
+    status : Enum[Pending,Processed,Failed,Ignored] = Pending
+    processed_at : DateTime?
+    error_message : Text?
+    
+    // Связанные документы
+    related_document_type : Enum[CustomerInvoice,PaymentRequest,BankTransaction]?
+    related_document_id : Text?
+    
+    received_at : DateTime(auto_create)
+  }
+}
+
+module Reporting {
+  // ===== FINANCIAL STATEMENTS =====
+  
+  entity FinancialReport {
+    doc = "Финансовый отчёт"
+    pk = id
+    
+    report_code : Code(20, unique, required)
+    report_name : Text(200, required, i18n)
+    
+    // Тип отчёта
+    report_type : Enum[ProfitLoss,BalanceSheet,CashFlow,EquityStatement,TrialBalance]
+    
+    // Параметры
+    entity : LegalEntity(1, required)
+    reporting_currency : Currency(1, required)
+    accounting_standard : Enum[IFRS,USGAAP,Local] = IFRS
+    
+    // Период
+    period_from : Date(required)
+    period_to : Date(required)
+    
+    // Сравнительный период
+    comparative_from : Date?
+    comparative_to : Date?
+    
+    // Строки отчёта
+    report_lines : FinancialReportLine*
+    
+    // Статус
+    status : Enum[Draft,Final,Published] = Draft
+    
+    // Генерация
+    generated_by : User(1)
+    generated_at : DateTime(auto_create)
+    published_at : DateTime?
+  }
+  
+  entity FinancialReportLine {
+    doc = "Строка финансового отчёта"
+    pk = id
+    
+    report : FinancialReport(1, backref=report_lines)
+    line_number : Int(required)
+    
+    // Иерархия
+    parent_line : FinancialReportLine?
+    level : Int(required, min=1)
+    
+    // Описание
+    line_code : Code(20, required)
+    line_name : Text(200, required, i18n)
+    
+    // Формула
+    calculation_formula : Text? // например: "1000..1999"
+    account_range_from : Code?
+    account_range_to : Code?
+    
+    // Значения
+    current_amount : Money(required)
+    comparative_amount : Money(default=0)
+    variance : Money(calc=current_amount - comparative_amount)
+    variance_pct : Decimal(5,2, calc=variance/comparative_amount*100)
+    
+    // Форматирование
+    is_total : Bool(default=false)
+    is_subtotal : Bool(default=false)
+    show_in_thousands : Bool(default=false)
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== KPI & UNIT-ECONOMY =====
+  
+  entity KPIDashboard {
+    doc = "Дашборд KPI"
+    pk = id
+    
+    dashboard_name : Text(100, required)
+    entity : LegalEntity(1, required)
+    
+    // Период
+    period_from : Date(required)
+    period_to : Date(required)
+    
+    // Метрики
+    kpi_metrics : KPIMetric*
+    
+    // Доступ
+    visible_to_roles : Role*
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+    last_calculated : DateTime?
+  }
+  
+  entity KPIMetric {
+    doc = "KPI метрика"
+    pk = id
+    
+    dashboard : KPIDashboard(1, backref=kpi_metrics)
+    
+    metric_code : Code(20, required)
+    metric_name : Text(100, required, i18n)
+    metric_category : Enum[Financial,Operational,Customer,Unit-Economy]
+    
+    // Формула расчёта
+    calculation_method : Enum[Formula,Query,API] = Formula
+    formula : Text? // например: "revenue / customer_count"
+    sql_query : Text?
+    
+    // Значение
+    current_value : Decimal(18,6)
+    target_value : Decimal(18,6)?
+    
+    // Форматирование
+    value_type : Enum[Amount,Percentage,Count,Ratio] = Amount
+    currency : Currency?
+    decimal_places : Int(default=2)
+    
+    // Тренд
+    previous_value : Decimal(18,6)?
+    trend : Enum[Up,Down,Flat] = Flat
+    
+    last_calculated : DateTime?
+    calculation_error : Text?
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  // Предопределённые KPI для Unit-Economy
+  entity UnitEconomicsKPI {
+    doc = "Unit-Economics KPI"
+    pk = id
+    
+    entity : LegalEntity(1, required)
+    period : Date(required) // месяц расчёта
+    
+    // Customer Metrics
+    new_customers : Int(default=0)
+    total_customers : Int(default=0)
+    churned_customers : Int(default=0)
+    
+    // Revenue Metrics
+    mrr : Money(default=0) // Monthly Recurring Revenue
+    arr : Money(calc=mrr * 12) // Annual Recurring Revenue
+    arpu : Money(calc=mrr / total_customers) // Average Revenue Per User
+    
+    // Cost Metrics
+    cac : Money(default=0) // Customer Acquisition Cost
+    cogs : Money(default=0) // Cost of Goods Sold
+    
+    // Profitability
+    gross_margin : Money(calc=mrr - cogs)
+    gross_margin_pct : Decimal(5,2, calc=gross_margin/mrr*100)
+    
+    // Lifetime Value
+    ltv : Money(calc=arpu * 12 / churn_rate) // упрощённая формула
+    ltv_cac_ratio : Decimal(5,2, calc=ltv / cac)
+    
+    // Churn
+    churn_rate : Decimal(5,4, calc=churned_customers / total_customers)
+    
+    // Burn Rate
+    burn_rate : Money(default=0)
+    runway_months : Int(calc=cash_balance / burn_rate)
+    cash_balance : Money(default=0)
+    
+    calculated_by : User(1)
+    calculated_at : DateTime(auto_create)
+  }
+}
+
+module Compliance {
+  // ===== ROLES & PERMISSIONS =====
+  
+  entity Role {
+    doc = "Роль пользователя"
+    pk = id
+    
+    role_code : Code(20, unique, required)
+    role_name : Text(100, required, i18n)
+    description : Text(500, i18n)
+    
+    // Шаблон роли
+    role_template : Enum[Accountant,APClerk,ARClerk,Treasury,CFO,Auditor,Custom] = Custom
+    
+    // Права доступа
+    permissions : Permission*
+    
+    // SoD ограничения
+    segregation_conflicts : Role* // конфликтующие роли
+    
+    is_active : Bool(default=true)
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  entity Permission {
+    doc = "Разрешение на операцию"
+    pk = id
+    
+    permission_code : Code(50, unique, required)
+    permission_name : Text(200, required, i18n)
+    
+    // Ресурс и операция
+    resource_type : Text(50, required) // название сущности
+    operation : Enum[Create,Read,Update,Delete,Approve,Post,Reverse] = Read
+    
+    // Ограничения
+    field_restrictions : Text* // список запрещённых полей
+    entity_restriction : LegalEntity? // ограничение по компании
+    amount_limit : Money? // лимит по сумме
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  entity UserRole {
+    doc = "Назначение роли пользователю"
+    pk = id
+    
+    user : User(1, required)
+    role : Role(1, required)
+    entity : LegalEntity? // ограничение по компании
+    
+    // Временные ограничения
+    valid_from : Date(required)
+    valid_to : Date?
+    
+    assigned_by : User(1)
+    assigned_at : DateTime(auto_create)
+  }
+  
+  // ===== AUDIT TRAIL =====
+  
+  entity AuditLog {
+    doc = "Журнал аудита - неизменяемый лог всех операций"
+    pk = id
+    
+    // Идентификация
+    event_id : Text(36, unique, required) // UUID
+    sequence_number : Int(auto_seq, unique) // для hash-chain
+    
+    // Событие
+    event_type : Enum[Create,Update,Delete,Approve,Post,Reverse,Login,Logout]
+    entity_type : Text(50, required) // тип сущности
+    entity_id : Text(36, required) // ID сущности
+    
+    // Пользователь
+    user : User(1, required)
+    session_id : Text(36)
+    ip_address : Text(45)
+    user_agent : Text(500)
+    
+    // Данные изменения
+    old_values : Json? // предыдущие значения
+    new_values : Json? // новые значения
+    changed_fields : Text* // список изменённых полей
+    
+    // Контекст
+    business_context : Text(200) // например: "Period Close 2024-01"
+    
+    // Время
+    event_timestamp : DateTime(auto_create)
+    
+    // Hash-chain для неизменности
+    previous_hash : Text(64) // SHA-256 предыдущей записи
+    current_hash : Text(64, calc=sha256(sequence_number + event_id + event_timestamp + previous_hash))
+  }
+  
+  // ===== GDPR/PDPL COMPLIANCE =====
+  
+  entity DataSubject {
+    doc = "Субъект персональных данных"
+    pk = id
+    
+    subject_id : Text(36, unique, required)
+    subject_type : Enum[Customer,Vendor,Employee,Contact] = Customer
+    
+    // Согласие на обработку
+    consent_given : Bool(default=false)
+    consent_date : DateTime?
+    consent_purpose : Text(500)
+    
+    // Запросы субъекта
+    data_requests : DataSubjectRequest*
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  entity DataSubjectRequest {
+    doc = "Запрос субъекта данных"
+    pk = id
+    
+    subject : DataSubject(1, backref=data_requests)
+    
+    request_type : Enum[Access,Rectification,Erasure,Portability,Restriction] = Access
+    request_date : Date(required)
+    
+    description : Text(1000)
+    
+    // Обработка
+    status : Enum[Received,InProgress,Completed,Rejected] = Received
+    assigned_to : User?
+    
+    response_due_date : Date(calc=request_date + 30) // 30 дней по GDPR
+    completed_date : Date?
+    response_notes : Text?
+    
+    created_by : User(1)
+    created_at : DateTime(auto_create)
+  }
+  
+  // ===== TAX COMPLIANCE =====
+  
+  entity TaxCode {
+    doc = "Налоговый код"
+    pk = id
+    
+    tax_code : Code(10, unique, required)
+    tax_name : Text(100, required, i18n)
+    
+    // Тип налога
+    tax_type : Enum[VAT,IncomeTax,WithholdingTax,SalesTax,Custom] = VAT
+    
+    // Ставка
+    tax_rate : Decimal(5,2, required) // процент
+    
+    // Счета для проводок
+    tax_payable_account : ChartOfAccount(1)
+    tax_receivable_account : ChartOfAccount(1)
+    tax_expense_account : ChartOfAccount(1)
+    
+    // Настройки
+    is_inclusive : Bool(default=false) // включён в цену
+    is_active : Bool(default=true)
+    
+    // Юрисдикция
+    country : Country(1, required)
+    region : Text?
+    
+    valid_from : Date(required)
+    valid_to : Date?
+    
+    created_at : DateTime(auto_create)
+  }
+  
+  entity TaxReturn {
+    doc = "Налоговая декларация"
+    pk = id
+    
+    return_number : Code(auto_seq="TAX-{YYYY}-{###}")
+    entity : LegalEntity(1, required)
+    
+    // Тип и период
+    tax_type : Enum[VAT,IncomeTax,WithholdingTax] = VAT
+    period_from : Date(required)
+    period_to : Date(required)
+    
+    // Суммы
+    taxable_base : Money(required)
+    tax_amount : Money(required)
+    tax_paid : Money(default=0)
+    tax_due : Money(calc=tax_amount - tax_paid)
+    
+    // Статус
+    status : Enum[Draft,Filed,Paid,Overdue] = Draft
+    
+    // Сроки
+    filing_due_date : Date(required)
+    payment_due_date : Date(required)
+    filed_date : Date?
+    
+    // Файлы
+    return_file : Document?
+    
+    prepared_by : User(1)
+    created_at : DateTime(auto_create)
+    filed_at : DateTime?
+  }
+}
+
+// ===== ПОДДЕРЖИВАЮЩИЕ СУЩНОСТИ =====
+
+entity User {
+  doc = "Пользователь системы"
+  pk = id
+  
+  username : Code(50, unique, required)
+  email : Email(unique, required)
+  
+  first_name : Text(100, required)
+  last_name : Text(100, required)
+  full_name : Text(calc=first_name + " " + last_name)
+  
+  // Настройки
+  default_entity : LegalEntity?
+  preferred_language : Enum[EN,RU,KZ] = EN
+  timezone : Text(50, default="UTC")
+  
+  // Статус
+  is_active : Bool(default=true)
+  last_login : DateTime?
+  
+  // Роли
+  roles : UserRole*
+  
+  created_at : DateTime(auto_create)
+  updated_at : DateTime(auto_update)
+}
+
+entity Contact {
+  doc = "Контактное лицо"
+  pk = id
+  
+  first_name : Text(100, required)
+  last_name : Text(100, required)
+  full_name : Text(calc=first_name + " " + last_name)
+  
+  title : Text(100)
+  department : Text(100)
+  
+  email : Email?
+  phone : Phone?
+  mobile : Phone?
+  
+  is_primary : Bool(default=false)
+  
+  created_at : DateTime(auto_create)
+}
+
+entity Address {
+  doc = "Адрес"
+  pk = id
+  
+  address_line1 : Text(200, required)
+  address_line2 : Text(200)
+  city : Text(100, required)
+  state : Text(100)
+  postal_code : Text(20)
+  country : Country(1, required)
+  
+  created_at : DateTime(auto_create)
+}
+
+entity Country {
+  doc = "Справочник стран"
+  pk = code
+  
+  code : Code(2, required) // ISO 3166-1
+  name : Text(100, required, i18n)
+  currency : Currency(1)
+  
+  is_active : Bool(default=true)
+}
+
+entity Document {
+  doc = "Прикреплённый документ"
+  pk = id
+  
+  file_name : Text(255, required)
+  file_size : Int(required)
+  mime_type : Text(100, required)
+  
+  // Хранение
+  storage_path : Text(500, required)
+  file_hash : Text(64, required) // SHA-256
+  
+  // Мета-данные
+  description : Text(500)
+  document_type : Text(50)
+  
+  uploaded_by : User(1)
+  uploaded_at : DateTime(auto_create)
+}
+
+entity PaymentTerm {
+  doc = "Условия оплаты"
+  pk = id
+  
+  term_code : Code(20, unique, required)
+  term_name : Text(100, required, i18n)
+  
+  // Условие
+  days : Int(required, min=0) // дней до оплаты
+  discount_days : Int(default=0) // дней для скидки
+  discount_pct : Decimal(5,2, default=0) // процент скидки
+  
+  is_active : Bool(default=true)
+  created_at : DateTime(auto_create)
+}
+
+// Базовые сущности для связей (заглушки)
+entity BusinessPartner { pk = id; name : Text(200, required) }
+entity Product { pk = id; code : Code(20, unique); name : Text(200, required) }
+entity PurchaseOrder { pk = id; number : Code(auto_seq="PO-{####}") }
+entity SalesOrder { pk = id; number : Code(auto_seq="SO-{####}") }
+entity CostCenter { pk = id; code : Code(20, unique); name : Text(100, required) }
+entity Project { pk = id; code : Code(20, unique); name : Text(200, required) }
+entity Department { pk = id; code : Code(20, unique); name : Text(100, required) }
+entity PriceList { pk = id; code : Code(20, unique); name : Text(100, required) }
+
+// ===== WORKFLOWS & ACTIONS =====
+
+workflow InvoiceApproval for VendorInvoice initial=Draft {
+  Draft -> PendingApproval on SubmitForApproval() when total_amount > 0
+  PendingApproval -> Approved on ApproveInvoice() when approval_workflow.status == Approved
+  PendingApproval -> Rejected on RejectInvoice()
+  Approved -> Paid on MarkAsPaid()
+  Rejected -> Draft on ResubmitInvoice()
+}
+
+action SubmitForApproval(invoice: VendorInvoice) when invoice.status == Draft {
+  invoice.status = PendingApproval
+  
+  // Создаём экземпляр workflow
+  workflow = ApprovalWorkflow.findByAmountAndDept(invoice.total_amount, invoice.created_by.department)
+  
+  if (workflow) {
+    approval = ApprovalInstance.create(workflow, invoice.id, VendorInvoice)
+    approval.start()
+  }
+  
+  emit Event.InvoiceSubmittedForApproval(invoice.id)
+}
+
+action PostJournalEntry(entry: LedgerEntry) when entry.status == Draft {
+  // Проверяем балансировку
+  if (!entry.is_balanced) {
+    throw ValidationError("Journal entry is not balanced")
+  }
+  
+  // Проверяем период
+  if (entry.period.status == HardClose) {
+    throw ValidationError("Cannot post to closed period")
+  }
+  
+  entry.status = Posted
+  entry.posted_by = current_user()
+  entry.posted_at = now()
+  
+  emit Event.JournalEntryPosted(entry.id)
+}
+
+action ProcessBankStatement(statement: BankStatement) {
+  for (transaction in statement.transactions) {
+    // Применяем правила автосверки
+    rules = ReconciliationRule.findActive(statement.bank_account)
+    
+    for (rule in rules) {
+      if (rule.matches(transaction)) {
+        transaction.reconciliation_status = Matched
+        transaction.match_confidence = rule.calculateConfidence(transaction)
+        break
+      }
+    }
+  }
+  
+  statement.reconciliation_status = PartiallyReconciled
+  emit Event.BankStatementProcessed(statement.id)
+}
+
+action CalculateUnitEconomics(entity: LegalEntity, period: Date) {
+  kpi = UnitEconomicsKPI.findOrCreate(entity, period)
+  
+  // Рассчитываем метрики из данных GL и CRM
+  kpi.mrr = calculateMRR(entity, period)
+  kpi.new_customers = countNewCustomers(entity, period)
+  kpi.total_customers = countTotalCustomers(entity, period)
+  kpi.cac = calculateCAC(entity, period)
+  kpi.burn_rate = calculateBurnRate(entity, period)
+  
+  kpi.save()
+  emit Event.UnitEconomicsCalculated(entity.id, period)
+}
+
+// ===== FORMS (UI) =====
+
+form VendorForm for Vendor layout=2col {
+  group "Basic Information" {
+    vendor_code, vendor_name, legal_name
+    vendor_type, vendor_category
+    status, block_reason
+  }
+  
+  group "Contact Details" {
+    primary_contact, billing_address
+    shipping_address
+  }
+  
+  group "Financial Settings" {
+    payment_terms, default_currency
+    credit_limit, credit_rating
+  }
+  
+  group "Compliance" collapsible {
+    tax_number, vat_number, registration_number
+    kyc_status, kyc_documents
+  }
+}
+
+form VendorInvoiceForm for VendorInvoice layout=1col {
+  group "Invoice Header" {
+    vendor, invoice_number, vendor_invoice_number
+    invoice_date, due_date, currency
+  }
+  
+  group "Lines" {
+    invoice_lines
+  }
+  
+  group "Totals" {
+    subtotal, tax_amount, total_amount
+  }
+  
+  group "Workflow" collapsible {
+    status, approval_workflow, match_status
+  }
+}
+
+form LedgerEntryForm for LedgerEntry layout=1col {
+  group "Header" {
+    entity, posting_date, period
+    source_document_type, reference, description
+  }
+  
+  group "Lines" {
+    lines
+  }
+  
+  group "Control" {
+    total_debit, total_credit, is_balanced
+    status
+  }
+}
+
+// ===== LISTS =====
+
+list VendorList columns={vendor_code,vendor_name,status,credit_limit,created_at} 
+  filters={status,vendor_type,credit_rating} sort=vendor_code asc page=50
+
+list InvoiceList columns={invoice_number,vendor.vendor_name,invoice_date,total_amount,status} 
+  filters={status,vendor,invoice_date} sort=invoice_date desc page=25
+
+list JournalEntryList columns={entry_number,posting_date,description,total_debit,status} 
+  filters={status,period,entity} sort=posting_date desc page=25
+
+// ===== SECURITY =====
+
+role APClerk grants rcu on VendorInvoice,VendorInvoiceLine,Vendor except fields credit_limit
+role APClerk grants r on ChartOfAccount,PaymentTerm,Currency
+
+role ARClerk grants rcu on CustomerInvoice,CustomerInvoiceLine,Customer,CustomerPayment
+role ARClerk grants r on ChartOfAccount,PaymentTerm,Currency
+
+role Accountant grants rcu on LedgerEntry,LedgerLine,JournalEntryTemplate,AccrualSchedule
+role Accountant grants r on *
+
+role Treasury grants rcu on BankAccount,BankStatement,BankTransaction,PaymentRun
+role Treasury grants r on VendorInvoice,CustomerInvoice,CashForecast
+
+role CFO grants * on *
+
+role Auditor grants r on * except fields api_key,secret_key,password
+
+// Segregation of Duties
+role APClerk conflicts with Treasury  // не может и создавать счета и платить их
+role ARClerk conflicts with Treasury  // не может и выставлять счета и получать платежи
+role Accountant conflicts with Treasury // разделение учёта и казначейства
+
+// ===== ПОЛИТИКИ МАСКИРОВАНИЯ =====
+
+policy Vendor.tax_number mask='***-**-####' for role Viewer
+policy Customer.tax_number mask='***-**-####' for role Viewer
+policy BankAccount.account_number mask='****-****-****-####' for role APClerk,ARClerk 

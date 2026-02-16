@@ -1,0 +1,41 @@
+erp SimpleCompany 1.0
+
+use pack Base.v1
+
+entity User {
+  name: Text
+  email: Email
+  is_active: Bool
+}
+
+entity Company {
+  name: Text
+  email: Email
+  phone: Phone
+  is_active: Bool
+}
+
+entity Customer {
+  name: Text
+  email: Email
+  phone: Phone
+  is_active: Bool
+}
+
+entity Product {
+  name: Text
+  price: Money
+  is_active: Bool
+}
+
+entity Order {
+  customer: Customer
+  product: Product
+  quantity: Int
+  total: Money
+  status: Text
+}
+
+role Admin grants all on *
+role Manager grants read,create,update on Customer,Product,Order
+role User grants read on Product 

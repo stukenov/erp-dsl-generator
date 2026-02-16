@@ -1,0 +1,21 @@
+module Inventory {
+  doc = "Модуль управления складом"
+
+  entity Warehouse {
+    doc = "Склад"
+    pk = id
+    name: Text
+    is_active: Bool
+  }
+
+  entity StockItem {
+    doc = "Складская позиция"
+    pk = id
+    warehouse: Warehouse
+    product: Product
+    quantity: Int
+  }
+}
+
+role WarehouseManager grants crud on Warehouse,StockItem
+role WarehouseWorker grants read on Warehouse,StockItem 

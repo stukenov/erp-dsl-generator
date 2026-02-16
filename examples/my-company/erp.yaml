@@ -1,0 +1,28 @@
+name: MyCompany
+version: 1.0.0
+description: "Корпоративная ERP система для управления продажами и складом"
+
+database:
+  type: sqlite
+  file: database.sqlite
+
+conventions:
+  - Base.v1
+  - Business.v1
+
+features:
+  - multi_module: true
+  - audit_trails: true
+  - event_system: true
+  - role_based_access: true
+
+ui:
+  theme: default
+  language: ru
+  date_format: DD.MM.YYYY
+  currency: RUB
+
+api:
+  version: v1
+  docs: true
+  cors: true 

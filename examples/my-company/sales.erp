@@ -1,0 +1,79 @@
+module Sales {
+  doc = "Модуль управления продажами"
+
+  entity Customer {
+    doc = "Клиент компании"
+    pk = id
+    code: Code(auto_seq="CUST-{####}", unique)
+    name: Text(required, max=200)
+    email: Email(unique)
+    phone: Phone
+    company: Company?
+    is_active: Bool=true
+    
+    created_at: DateTime(auto_create)
+    updated_at: DateTime(auto_update)
+  }
+
+  entity Product {
+    doc = "Товар или услуга"
+    pk = id
+    code: Code(auto_seq="PROD-{####}", unique)
+    name: Text(required, max=200)
+    description: Text(max=1000)
+    price: Money(required, min=0)
+    is_active: Bool=true
+    
+    created_at: DateTime(auto_create)
+    updated_at: DateTime(auto_update)
+  }
+
+  entity Order {
+    doc = "Заказ клиента"
+    pk = id
+    number: Code(auto_seq="ORD-{YYYY}-{####}", unique)
+    customer: Customer(1)
+    lines: OrderLine*(backref=order, cascade)
+    total_amount: Money(calc=sum(lines.amount))
+    status: Enum[Draft,Confirmed,Shipped,Closed]=Draft
+    order_date: Date(auto_create)
+    
+    created_at: DateTime(auto_create)
+    updated_at: DateTime(auto_update)
+  }
+
+  entity OrderLine {
+    doc = "Строка заказа"
+    order: Order(1, cascade)
+    product: Product(1)
+    quantity: Decimal(10,2, required, min=0)
+    price: Money(required, min=0)
+    amount: Money(calc=quantity*price)
+  }
+
+  action ConfirmOrder(order: Order) when order.status == "Draft" {
+    order.status = "Confirmed"
+    emit OrderConfirmed(order.id)
+  }
+
+  action ShipOrder(order: Order) when order.status == "Confirmed" {
+    order.status = "Shipped"
+    emit OrderShipped(order.id)
+  }
+
+  form CustomerForm for Customer layout=2col {
+    group "Основная информация" {
+      code, name, email, phone
+    }
+    group "Связи" {
+      company
+    }
+    group "Статус" {
+      is_active
+    }
+  }
+}
+
+role SalesManager grants crud on Customer,Product,Order,OrderLine
+role SalesAgent grants rcu on Customer,Order,OrderLine
+role Customer grants read on Product 

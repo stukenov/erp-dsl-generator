@@ -1,0 +1,77 @@
+module Inventory {
+  doc = "Модуль управления складом"
+
+  entity Warehouse {
+    doc = "Склад"
+    pk = id
+    code: Code(auto_seq="WH-{###}", unique)
+    name: Text(required, max=200)
+    address: Address
+    is_active: Bool=true
+    
+    created_at: DateTime(auto_create)
+    updated_at: DateTime(auto_update)
+  }
+
+  entity StockItem {
+    doc = "Складская позиция"
+    pk = id
+    warehouse: Warehouse(1)
+    product: Product(1)
+    quantity: Int(min=0)=0
+    reserved: Int(min=0)=0
+    available: Int(calc=quantity-reserved)
+    
+    created_at: DateTime(auto_create)
+    updated_at: DateTime(auto_update)
+  }
+
+  entity StockMovement {
+    doc = "Движение по складу"
+    pk = id
+    warehouse: Warehouse(1)
+    product: Product(1)
+    movement_type: Enum[In,Out,Transfer,Adjustment]
+    quantity: Int(required)
+    reference: Text(max=100)
+    notes: Text(max=500)
+    movement_date: Date(auto_create)
+    
+    created_at: DateTime(auto_create)
+    updated_at: DateTime(auto_update)
+  }
+
+  action ReceiveGoods(warehouse: Warehouse, product: Product, quantity: Int) {
+    call CreateStockMovement(warehouse, product, "In", quantity)
+    call UpdateStockQuantity(warehouse, product, quantity)
+    emit GoodsReceived(warehouse.id, product.id, quantity)
+  }
+
+  action ShipGoods(warehouse: Warehouse, product: Product, quantity: Int) {
+    call CreateStockMovement(warehouse, product, "Out", -quantity)
+    call UpdateStockQuantity(warehouse, product, -quantity)
+    emit GoodsShipped(warehouse.id, product.id, quantity)
+  }
+
+  form WarehouseForm for Warehouse layout=single {
+    group "Основная информация" {
+      code, name, is_active
+    }
+    group "Адрес" {
+      address
+    }
+  }
+
+  form StockItemForm for StockItem layout=2col {
+    group "Склад и товар" {
+      warehouse, product
+    }
+    group "Количество" {
+      quantity, reserved, available
+    }
+  }
+}
+
+role WarehouseManager grants crud on Warehouse,StockItem,StockMovement
+role WarehouseWorker grants rcu on StockItem,StockMovement
+role Viewer grants read on Warehouse,StockItem 
