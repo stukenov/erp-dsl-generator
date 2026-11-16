@@ -33,8 +33,8 @@ DSL → AST → CIR (Canonical IR) → Генераторы → Артефакт
 
 ```bash
 # Клонирование репозитория
-git clone https://github.com/stukenov/erp-core.git
-cd erp-core
+git clone https://github.com/stukenov/erp-dsl-generator.git
+cd erp-dsl-generator
 
 # Установка зависимостей
 npm install
@@ -256,7 +256,7 @@ npm run demo:fullstack
 ## 📁 Структура проекта
 
 ```
-erp-core/
+erp-dsl-generator/
 ├── src/
 │   ├── parser/           # Парсеры DSL
 │   ├── cir/             # CIR конверторы
@@ -325,8 +325,7 @@ Copyright (c) 2025 Saken Tukenov
 
 ## 🆘 Поддержка
 
-- 💬 Discussions: [GitHub Discussions](https://github.com/stukenov/erp-core/discussions)
-- 🐛 Issues: [GitHub Issues](https://github.com/stukenov/erp-core/issues)
+- 🐛 Issues: [GitHub Issues](https://github.com/stukenov/erp-dsl-generator/issues)
 
 ---
 
